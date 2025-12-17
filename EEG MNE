@@ -1,0 +1,400 @@
+import os
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
+import pandas as pd
+
+
+#
+import glob
+eeg_folder = "/home/sv25/Desktop/eeg_files+annotations/150017287/ses-1/eeg/"
+edf_file = glob.glob(f"{eeg_folder}/*.edf")
+
+#
+
+print("=" * 30)
+print("edf processing on franklin")
+print("=" * 30)
+
+#### load edf data
+
+#######sample_data_folder = mne.datasets.sample.data_path()
+######please tries to use definite path to get both your edf and csv file since otherwise they might guide it to wrong folder
+edf_file_path = "/home/sv25/Desktop/eeg_files+annotations/150017287/ses-1/eeg/sub-I0002150017287_ses-1_task-EEG_eeg.edf"
+raw = mne.io.read_raw_edf(edf_file_path, preload=False)
+print(f"sample frequency: {raw.info['sfreq']} Hz")
+print(f"data sample points: {len(raw.times)}")
+print(f"sample length: {raw.times[-1]:.2f} s")
+
+
+
+#### setting up the bipolar montage
+
+def create_longitudinal_bipolar_montage(raw):
+
+    bipolar_pairs = [
+        ('Fp1', 'F7', 'Fp1-F7'),            # left temporal chain
+        ('F7', 'T3', 'F7-T3'),
+        ('T3', 'T5', 'T3-T5'),
+        ('T5', 'O1', 'T5-O1'),
+        ('Fp2', 'F8', 'Fp2-F8'),            # right temporal chain
+        ('F8', 'T4', 'F8-T4'),
+        ('T4', 'T6', 'T4-T6'),
+        ('T6', 'O2', 'T6-O2'),
+        ('Fp1', 'F3', 'Fp1-F3'),            # left parasagittal
+        ('F3', 'C3', 'F3-C3'),
+        ('C3', 'P3', 'C3-P3'),
+        ('P3', 'O1', 'P3-O1'),
+        ('Fp2', 'F4', 'Fp2-F4'),            # right parasagittal
+        ('F4', 'C4', 'F4-C4'),
+        ('C4', 'P4', 'C4-P4'),
+        ('P4', 'O2', 'P4-O2'),
+        ('Fz', 'Cz', 'Fz-Cz'),              # mid-chain
+        ('Cz', 'Pz', 'Cz-Pz'),
+    ]
+
+    bipolar_data = []
+    bipolar_ch_names = []
+    sfreq = raw.info['sfreq']
+
+    for ch1, ch2, ch_name in bipolar_pairs:
+        if ch1 in raw.ch_names and ch2 in raw.ch_names:
+            data1 = raw.get_data(picks=ch1)[0]
+            data2 = raw.get_data(picks=ch2)[0]
+            bipolar_data.append(data1 - data2)
+            bipolar_ch_names.append(ch_name)
+
+    info = mne.create_info(bipolar_ch_names, sfreq, ch_types='eeg')
+    bipolar_raw = mne.io.RawArray(np.array(bipolar_data), info)
+    return bipolar_raw
+
+raw = create_longitudinal_bipolar_montage(raw)
+print(f"number of bipolar channels: {len(raw.ch_names)}")
+
+
+
+##### extract CSV documents
+### important! remeber to change the patient database+ID and the session, making sure it matches with the edf file above
+
+try:
+    csv_path = "/home/sv25/Desktop/eeg_files+annotations/150017287/ses-1/eeg/sub-I0002150017287_ses-1_task-EEG_annotations.csv"
+
+
+except Exception as e:
+    print(f"error, can't find csv: {e}")
+
+def extract_csv_annotations(csv_path):
+    """extract annotations from CSV file,
+    CSV file contains loads of other information"""
+    try:
+        df = pd.read_csv(csv_path)
+
+        ## extract event label
+        events = []
+        start_recording_time = None
+        stop_recording_time = None
+
+        for idx, row in df.dropna(subset=['Text', 'Stamp']).iterrows():
+            text = str(row['Text']).strip()
+            stamp = float(row['Stamp'])/256
+
+            ## filter out useless information in the tuple
+            skip_texts = ['montage:', 'review', 'movement',
+                          'eye opened', 'eye closed','video recording on,', 'video recording off,'
+                          'video recording fault,', 'started analyzer - xlevent / ecg，','started analyzer - data trends，',
+                          'video system error', 'started analyzer - persyst，'
+                          , 'analyzer info - persyst,','arouses','chewing','arousal',
+                          'patient event clip', 'headbox reconnected','breakout box *****.',
+                          'recording analyzer - xlevent / ecg,', 'recording analyzer - data trends,', 'recording analyzer - persyst,',
+                          'off camera,', 'not on camera,']
+
+            if any(skip in text.lower() for skip in skip_texts):
+                continue
+
+            if 'start recording' in text.lower():
+                start_recording_time = stamp
+                continue
+
+            elif 'stop recording' in text.lower():
+                stop_recording_time = stamp
+                continue
+
+            if text.isdigit() or len(text) <= 10:
+                duration = 0.0
+                if 'Duration' in df.columns and not pd.isna(row.get('Duration')):
+                     duration = float(row['Duration'])
+                events.append({
+                    'onset': stamp-(1407/256),
+                    'duration': duration,
+                    'description': text
+                })
+
+
+        if events:
+            print('final annotation is at:', events[-1])
+        else:
+            print("no numeric annotations found in csv")
+
+        if start_recording_time is not None:
+            print(f"Found start recording time: {start_recording_time:.3f} seconds")
+        else:
+            print("Warning: No start recording time found in CSV")
+
+        if stop_recording_time is not None:
+            print(f"Found stop recording time: {stop_recording_time:.3f} seconds")
+        else:
+            print("Warning: No stop recording time found in CSV")
+
+
+        if events:
+            onsets = [e['onset'] for e in events]
+            durations = [e['duration'] for e in events]
+            descriptions = [e['description'] for e in events]
+
+            annotations = mne.Annotations(
+                onsets,
+                durations,
+                descriptions
+            )
+
+            #return mne.Annotations(onsets, durations, descriptions)
+
+        else:
+
+            annotations = mne.Annotations([], [], [])
+
+        return annotations, start_recording_time, stop_recording_time
+
+            #print("no annotation found in csv")
+            #return mne.Annotations([], [], [])
+
+    except Exception as e:
+        print(f"errors on extraction: {e}")
+        return mne.Annotations([], [], []), None, None
+
+
+csv_annotations, start_time, stop_time = extract_csv_annotations(csv_path)
+raw.set_annotations(csv_annotations)
+
+
+# ================= TIME ALIGNMENT FIX =================
+# First "start recording" defines CSV→EDF offset
+if start_time is not None:
+    csv_offset = start_time
+else:
+    csv_offset = 0.0
+
+# Shift CSV-derived window into EDF time
+start_time = start_time - csv_offset if start_time is not None else None
+stop_time  = stop_time  - csv_offset if stop_time  is not None else None
+# =====================================================
+
+
+######## window setup
+#need to be updated with the end and start times from the annotations csv files
+
+if start_time is None:
+    start_time = 0
+    print("Using default start_time = 0")
+if stop_time is None:
+    end_time = raw.times[-1]
+    print(f"Using default end_time = {end_time:.2f}")
+else:
+    end_time = min(stop_time, raw.times[-1])
+
+print(f"Using start_time from CSV: {start_time:.3f} seconds")
+print(f"Using end_time from CSV: {end_time:.3f} seconds")
+
+raw_cropped = raw.copy()
+raw_cropped.crop(tmin=start_time, tmax=end_time)
+
+
+artifacts_to_drop = ['OSAT','PR']
+existing_artifacts = [ch for ch in artifacts_to_drop if ch in raw_cropped.ch_names]
+print(f"channels with artifact that i want to delete: {existing_artifacts}")
+raw_cropped.drop_channels(existing_artifacts)
+print(f"remaining channels after deletion: {len(raw_cropped.ch_names)}")
+
+raw_cropped.plot(start=20,
+                 duration=1,
+                 highpass=1,
+                 lowpass=70,
+                 scalings=60e-6)
+
+#plt.show()
+
+# plot psd
+print("Plotting PSD of raw cropped data...")
+raw_cropped.plot_psd(fmax=70,
+                     area_mode='range',
+                     average=True)
+#plt.show()
+
+raw_cropped.plot(start=20,
+                 duration=1,
+                 highpass=1,
+                 lowpass=70,
+                 scalings=60e-6)
+#plt.show()
+
+print(f"cropped data from {start_time}seconds to {end_time}seconds")
+print(f"cropped data length: {raw_cropped.times[-1]:.2f} seconds")
+print(start_time, end_time)
+######### marked some plt.show i was trying to increase generating speed but it doesn't work that well on large file anyway
+
+
+# setting up reference electrode
+raw_ref = raw_cropped.copy()
+raw_ref.load_data()
+#raw_ref.set_eeg_reference('average')
+#raw_ref.plot(start=20, duration=1, highpass=1, lowpass=70, scalings=60e-6)
+#plt.show()
+
+
+#low passing filter
+raw_filter = raw_ref.copy()
+raw_filter.filter(l_freq=0.3, h_freq=70)
+
+
+#notch filter
+raw_filter.notch_filter(freqs=60)
+raw_filter.plot_psd(fmax=70)
+plt.show(block=False)
+raw_filter.plot(
+                duration=10,
+                block=False,
+                title='lowpass filter has been set correctly, close the window and prepare for ICA',
+                scalings=60e-6)
+
+
+# ICA
+##picard is usually a better method but you do need install it in your terminal, if we are going to use it
+ica= mne.preprocessing.ICA(n_components=None,
+                           method='fastica',
+                           random_state=97)
+#ica.fit(raw_filter)
+#raw_filter.load_data()
+#ica.plot_sources(raw_filter,
+#                 show_scrollbars=True,
+#                 block=False,
+#                 title='parts need to be removed')
+#plt.show()
+#print(ica)
+
+raw_recons = raw_filter.copy()
+#raw_recons = ica.apply(raw_recons)
+#raw_filter.plot(start=20,
+#                duration=1,
+#                picks=mne.pick_types(raw_filter.info, eeg=True)[:10],
+#                block=False,
+#                title='before ICA processing, close')
+
+#raw_recons.plot(start=20,
+#                duration=1,
+#                picks=mne.pick_types(raw_recons.info, eeg=True)[:10],
+#                block=False,
+#                title='after ICA processing, close',
+#                 scalings=60e-6)
+
+#plt.gcf().axes[0].axvline(x=20, color='gray', linestyle='--', alpha=0.5)  ### remove when nesscary
+
+#plt.show(block=False)
+
+
+## high passing filter
+raw_recons.filter(l_freq=0.3, h_freq=70)
+raw_recons.notch_filter(freqs=60)
+
+
+########this this is the cutting section
+
+print("\n=== Converting Annotations to Epochs ===")
+
+
+skip_words = ['montage:', 'review', 'movement', 'eye opened', 'eye closed']
+selected_annots = []
+for ann in raw_recons.annotations:
+    desc = ann['description'].lower()
+    if not any(skip in desc for skip in skip_words):
+        selected_annots.append(ann)
+
+print(f"Found {len(selected_annots)} annotations")
+
+
+sfreq = raw_recons.info['sfreq']
+events_list = []
+valid_annotations = []
+
+for ann in selected_annots:
+    onset_sec = ann['onset']
+
+    if 5.0 <= onset_sec <= (raw_recons.times[-1] - 5.0):
+        sample_point = int(onset_sec * sfreq)
+        events_list.append([sample_point, 0, 1])
+        valid_annotations.append(ann)
+
+if not events_list:
+    print("No valid events within data range")
+    exit()
+
+events_array = np.array(events_list)
+print(f"Converted to {len(events_array)} events")
+
+
+print("Creating epochs...")
+
+epochs = mne.Epochs(raw_recons,
+                    events_array,
+                    event_id=1,
+                    tmin=-5.0,
+                    tmax=5.0,
+                    event_repeated='merge',
+                    baseline=None,
+                    preload=True,
+                    verbose=True)
+
+print(f"Created {len(epochs)} epochs")
+
+
+output_dir = "/home/sv25/Desktop/eeg_epochs_output"
+os.makedirs(output_dir, exist_ok=True)
+print(f"Saving individual epochs to: {output_dir}")
+
+
+saved_count = 0
+for i in range(len(epochs)):
+    single_epoch = epochs[i]
+
+
+    if i < len(valid_annotations):
+        single_epoch.comment = valid_annotations[i]['description']
+
+
+    fname = f"epoch_{i + 1:05d}_{valid_annotations[i]['description']}_eeg-epo.fif"
+    filepath = os.path.join(output_dir, fname)
+
+    try:
+        single_epoch.save(filepath, overwrite=True)
+        saved_count += 1
+
+        if (i + 1) % 50 == 0:
+            print(f"  Saved {i + 1}/{len(epochs)}")
+
+    except Exception as e:
+        print(f"Error saving epoch {i + 1}: {e}")
+
+print(f"\n✓ Saved {saved_count} individual epochs to {output_dir}")
+
+print("\nChecking saved files...")
+import glob
+
+saved_files = glob.glob(os.path.join(output_dir, "*.fif"))
+print(f"Found {len(saved_files)} FIF files in directory")
+if saved_files:
+    print(f"First file: {os.path.basename(saved_files[0])}")
+
+################################################################################################
+###### this code above is for data visualisation + splitting only
+###### it generates all types of graph we possiblely need, there might be a few more in my head that i need to figure out how to apply it in coding
