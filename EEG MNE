@@ -65,59 +65,57 @@ def create_longitudinal_bipolar_montage(raw):
     return bipolar_raw
 
 
-def extract_csv_annotations(csv_path):
+def extract_csv_annotations(csv_path, sfreq):
     """extract annotations from csv file"""
     try:
         df = pd.read_csv(csv_path)
-
         events = []
         start_recording_stamp = None
         start_recording_time = None
         stop_recording_time = None
 
-        print(f"Searching for recording markers in CSV...")
+        print(f"Searching for recording markers in CSV: {os.path.basename(csv_path)}")
+
+        found_start = False
 
         for idx, row in df.dropna(subset=['Text', 'Stamp']).iterrows():
             text = str(row['Text']).strip().lower()
+            stamp = float(row['Stamp'])
 
-
-            start_patterns = ['start recording',
-                              'recording start']
-            
-            if any(pattern in text_lower for pattern in start_pattterns):
-                if start_recording_time is None:
-                    start_recording_stamp = float(row['stamp'])
-                    start_recording_time = start_recording_stamp/sfreq
-                    print(f"Found start recording at stamp:{start_recording_stamp}",
-                          f"->Time = {start_recording_time:.3f} seconds")
-
+            if 'start recording' in text or 'recording' in text:
+                start_recording_stamp = stamp
+                start_recording_time = start_recording_time/sfreq
+                print(f" Found start recording time: stamp={start_recording_stamp}, Time ={start_recording_time:.3f}s")
+                found_start = True
                 break
-
-            if start_recording_stamp is None:
-                print(f"no start recording in the CSV file")
-                if 'stamp' in df .columns:
-                    min_stamp = df['stamp'].min()
-                    if min_stamp < 10000:
-                        start_recording_stamp = min_stamp
-                        start_recording_time = start_recording_stamp/sfreq
-                        print(f"! using earliest stamp as start:{start_recording_stamp}",
-                                f"-> {start_recording_time:.3f}")
-                        
+            
+            if not found_start:
+                print(f"no start recording in CSV")
+                if 'Stamp' in df.columns:
+                    min_stamp = df['Stamp'].min()
+                    start_recording_stamp = min_stamp
+                    start_recording_time = start_recording_stamp/sfreq
+                    print(f"using earliest stamp: {start_recording_stamp}-> {start_recording_time:.3f}")
 
                 else:
                     start_recording_stamp = 0
                     start_recording_time = 0
-                    print(f"using default starting stamp 0")
+                    print(f"using default 0")
 
 
 
-            for idx, row in df.dropna(subset=['Text', 'Stamp']).iterrows():
-                text = str(row['Text']).stripe()
-                stamp = float(row['Stamp'])
-                stamp_time = stamp/sfreq
+        print(f"\n extract annotations...")
+        event_count = 0
+        
+        for idx, row in df.dropna(subset=['Text', 'Stamp']).iterrows():
+            text = str(row['Text']).strip()
+            original_text = text
+            text_lower = text.lower()
+            stamp = float(row['Stamp'])
 
-
-
+            if 'start recording' in text_lower or 'stop recording' in text_lower:
+                continue
+            
             skip_texts = ['montage:', 'review', 'movement',
                           'eye opened', 'eye closed','video recording on,', 'video recording off,'
                           'video recording fault,', 'started analyzer - xlevent / ecg，','started analyzer - data trends，',
@@ -125,57 +123,69 @@ def extract_csv_annotations(csv_path):
                           'analyzer info - persyst,','arouses','chewing','arousal',
                           'patient event clip', 'headbox reconnected','breakout box *****.',
                           'recording analyzer - persyst,', 'off camera,', 'not on camera,',' recording analyzer - data trends']
-
-            if any(skip in text.lower() for skip in skip_texts):
+            
+            should_skip = False
+            for skip in skip_texts:
+                if skip in text_lower:
+                    should_skip = True
+                    break
+            
+            if should_skip:
                 continue
+            
+            is_event = False
+            
+            if text.isdigit():
+                is_event = True
+            
+            elif len(text) <= 10:
+                non_events = ['start', 'stop', 'on', 'off', 'error', 'fault']
+                if not any(non_event in text_lower for non_event in non_events):
+                    is_event = True
+            
+            if is_event:
+                duration = 0.0
+                if 'Duration' in df.columns and not pd.isna(row.get('Duration')):
+                    duration = float(row['Duration'])
+                
 
-            text_lower = text.lower()
-            if 'start recording' in text.lower() or 'stop recording' in text.lower():
-                continue
-
-            if text.isdigit() or len(text) <= 10:
-                corrected_onset = (stamp - start_recording_stamp)/sfreq
-
-
+                corrected_onset = (stamp - start_recording_stamp) / sfreq
+                
+                print(f" {event_count+1:03d}: '{original_text}' "
+                      f"@ Stamp={stamp}, relative time={corrected_onset:.3f}s")
+                
                 events.append({
-                    'onset': corrected_onset, 
+                    'onset': corrected_onset,
                     'duration': duration,
-                    'description': text
+                    'description': original_text
                 })
+                event_count += 1
         
- 
-        print(f" Using start recording stamp: {start_recording_stamp} "
-              f"(time: {start_recording_time:.3f}s)")
+        print(f"\n stats:")
+        print(f"  annotations found: {len(events)}")
         
-        if events:
-            print(f"Found {len(events)} events after time correction")
-            if len(events) > 0:
-                print(f"First event onset: {events[0]['onset']:.3f}s")
-                print(f"Last event onset: {events[-1]['onset']:.3f}s")
-        else:
-            print("No events found in CSV")
-        
-
         if events:
             onsets = [e['onset'] for e in events]
             durations = [e['duration'] for e in events]
             descriptions = [e['description'] for e in events]
             
-            annotations = mne.Annotations(
-                onsets,
-                durations,
-                descriptions
-            )
+            annotations = mne.Annotations(onsets, durations, descriptions)
+            
+            print(f"  first annotation: '{events[0]['description']}' @ {events[0]['onset']:.3f}s")
+            print(f"  last annotation: '{events[-1]['description']}' @ {events[-1]['onset']:.3f}s")
+            print(f" sucessfully created {len(annotations)} annotations")
+            
+            return annotations, start_recording_stamp, start_recording_time, stop_recording_time
         else:
-            annotations = mne.Annotations([], [], [])
-        
-  
-        return annotations, start_recording_stamp, start_recording_time, stop_recording_time
-
-
+            print(f"haven't found any event")
+            return mne.Annotations([], [], []), start_recording_stamp, start_recording_time, stop_recording_time
+            
     except Exception as e:
-        print(f"Error on CSV extraction: {e}")
-        return mne.Annotations([], [], []), None, None
+        print(f"\n CSV process error: {e}")
+        import traceback
+        traceback.print_exc()
+        return mne.Annotations([], [], []), None, None, None
+
 
 
 
@@ -201,8 +211,12 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
     # extract csv file
     if csv_path:
         print(f"Extracting CSV annotations...")
-        csv_annotations, start_time, stop_time = extract_csv_annotations(csv_path)
-        raw.set_annotations(csv_annotations)
+        csv_annotations, start_recording_stamp, start_time, stop_time = extract_csv_annotations(csv_path, actual_sfreq)
+
+        if csv_annnotations:
+            raw.set_annotations(csv_annotations)
+            print(f"loaded{csv_annotations} annotations from CSV")
+
 
         # match the eeg-annotations time
         if start_time is not None:
