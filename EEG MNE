@@ -84,23 +84,23 @@ def extract_csv_annotations(csv_path, sfreq):
 
             if 'start recording' in text or 'recording' in text:
                 start_recording_stamp = stamp
-                start_recording_time = start_recording_time/sfreq
+                start_recording_time = start_recording_stamp / sfreq
                 print(f" Found start recording time: stamp={start_recording_stamp}, Time ={start_recording_time:.3f}s")
                 found_start = True
                 break
             
-            if not found_start:
-                print(f"no start recording in CSV")
-                if 'Stamp' in df.columns:
-                    min_stamp = df['Stamp'].min()
-                    start_recording_stamp = min_stamp
-                    start_recording_time = start_recording_stamp/sfreq
-                    print(f"using earliest stamp: {start_recording_stamp}-> {start_recording_time:.3f}")
+        if not found_start:
+            print(f"no start recording in CSV")
+            if 'Stamp' in df.columns:
+                min_stamp = df['Stamp'].min()
+                start_recording_stamp = min_stamp
+                start_recording_time = start_recording_stamp/sfreq
+                print(f"using earliest stamp: {start_recording_stamp}-> {start_recording_time:.3f}")
 
-                else:
-                    start_recording_stamp = 0
-                    start_recording_time = 0
-                    print(f"using default 0")
+            else:
+                start_recording_stamp = 0
+                start_recording_time = 0
+                print(f"using default 0")
 
 
 
@@ -454,7 +454,7 @@ def process_single_session(patient_id, session, edf_path, csv_path, output_base_
 
         if success:
             print(f"Processing completed successfully")
-            # 保存处理摘要
+
             save_processing_summary(patient_id, session, session_output_dir, "success")
             return True
         else:
@@ -614,5 +614,4 @@ if __name__ == "__main__":
 
     print(f"\nProcessing complete. Check the output directory:")
     print(f"  {OUTPUT_BASE_DIR}")
-
 
