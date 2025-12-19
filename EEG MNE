@@ -53,12 +53,12 @@ def create_longitudinal_bipolar_montage(raw):
     bipolar_ch_names = []
     sfreq = raw.info['sfreq']
 
-    for ch1, ch2, ch_name in bipolar_pairs:
+    for ch1, ch2, ch_names in bipolar_pairs:
         if ch1 in raw.ch_names and ch2 in raw.ch_names:
             data1 = raw.get_data(picks=ch1)[0]
             data2 = raw.get_data(picks=ch2)[0]
             bipolar_data.append(data1 - data2)
-            bipolar_ch_names.append(ch_name)
+            bipolar_ch_names.append(ch_names)
 
     info = mne.create_info(bipolar_ch_names, sfreq, ch_types='eeg')
     bipolar_raw = mne.io.RawArray(np.array(bipolar_data), info)
@@ -194,6 +194,8 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
     """process a single session and resample to target frequency"""
 
     print(f"\n{'='*60}")
+
+
     print(f"Loading EDF file...")
     raw = mne.io.read_raw_edf(edf_path, preload=False)
 
@@ -213,7 +215,7 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
         print(f"Extracting CSV annotations...")
         csv_annotations, start_recording_stamp, start_time, stop_time = extract_csv_annotations(csv_path, actual_sfreq)
 
-        if csv_annnotations:
+        if csv_annotations:
             raw.set_annotations(csv_annotations)
             print(f"loaded{csv_annotations} annotations from CSV")
 
@@ -266,8 +268,10 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
     raw_filter.notch_filter(freqs=60)
 
     raw_recons = raw_filter.copy()
-    raw_recons.filter(l_freq=0.3, h_freq=70)
-    raw_recons.notch_filter(freqs=60)
+    raw_recons = create_longitudinal_bipolar_montage(raw_recons)
+    print(f" Bipolar montage applied: {len(raw_recons.ch_names)} channels")
+    print(f"Channel names:{raw_recons.ch_names}")
+    print(f"Converting annotations to epochs...")
 
 
 ##### making epochs
@@ -374,16 +378,13 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
             torch.save(tensor, pt_filepath)
             saved_count += 1
 
-            if (i + 1) % 20 == 0:
-                print(f"    Saved {i + 1}/{len(epochs_to_save)} PT files")
+            if (i + 1) % 5 == 0:
+                print(f"Saved {i + 1}/{len(epochs_to_save)} PT files")
 
         else:
-            print(f"    Warning: Epoch {i + 1} has no data")
+            print(f"Warning: Epoch {i + 1} has no data")
 
-    print(f"    ✓ Saved {saved_count} PT files to {output_dir}")
-
-
-
+    print(f"Saved {saved_count} PT files to {output_dir}")
 
 
 
@@ -394,11 +395,9 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
         del epochs_resampled
     import gc
     gc.collect()
-
     return True
 
 
-#######################################################################################################################
 
 def find_session_files(base_path, patient_id, session):
     """check edf and csv file for patient id"""
@@ -444,9 +443,21 @@ def process_single_session(patient_id, session, edf_path, csv_path, output_base_
 
     patient_output_dir = os.path.join(output_base_dir, f"patient_{patient_id}")
     session_output_dir = os.path.join(patient_output_dir, session)
+    
+    # testing directory
     os.makedirs(session_output_dir, exist_ok=True)
-
     print(f"Output directory: {session_output_dir}")
+
+
+    test_file = os.path.join(session_output_dir, "test_write_txt")
+    try: 
+        with open(test_file, 'w') as f:
+            f.write("test")
+        os.remove(test_file)
+
+    except Exception as e:
+        print(f" canmot write to {session_output_dir}:{e}")
+        return False
 
     try:
         # process eeg data
