@@ -8,18 +8,22 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime
+import multiprocessing as mp
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import concurrent.futures
 
 
 
-PATIENT_IDS = ["150017287"]
+PATIENT_IDS = ["150013054"]
 
 BASE_PATH = "/home/sv25/Desktop/eeg_files+annotations"
-SESSIONS_TO_PROCESS = ["ses-1", "ses-2", "ses-3", "ses-4", "ses-5", 
-                       "ses-6", "ses-8", "ses-9", "ses-11", 
-                       "ses-12", "ses-13", "ses-14", "ses-15", 
-                       "ses-16", "ses-17", "ses-18", "ses-19", 
-                       "ses-20", "ses-21", "ses-23", "ses-26",
-                       "ses-27", "ses-28"]
+SESSIONS_TO_PROCESS = ["ses-20", "ses-21","ses-22","ses-23","ses-24","ses-25","ses-26",
+                       "ses-27","ses-28","ses-29","ses-30","ses-31","ses-32","ses-33",
+                       "ses-34","ses-35","ses-36","ses-37","ses-38","ses-39","ses-40",
+                       "ses-100",]
+
+
 OUTPUT_BASE_DIR = "/home/sv25/Desktop/eeg_epochs_output"
 
 
@@ -125,7 +129,9 @@ def extract_csv_annotations(csv_path, sfreq):
                           'video system error', 'started analyzer - persyst，',
                           'analyzer info - persyst,','arouses','chewing','arousal',
                           'patient event clip', 'headbox reconnected','breakout box *****.',
-                          'recording analyzer - persyst,', 'off camera,', 'not on camera,',' recording analyzer - data trends']
+                          'recording analyzer - persyst,', 'off camera,', 'not on camera,',' recording analyzer - data trends',
+                          '*****', '3.0 hz', '6.0 hz', '9.0 hz', '12.0 hz', '15.0 hz', '18.0 hz', '21.0 hz', '25.0 hz', '30.0 hz',
+                          'eyes open', 'eyes close', 'dad w/pt', 'mvt']
             
             should_skip = False
             for skip in skip_texts:
@@ -284,11 +290,11 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
 ##### making epochs
     print(f"Converting annotations to epochs...")
     skip_words = ['montage:', 'review', 'movement', 'eye opened', 'eye closed']
-    selected_annots = []
-    for ann in raw_recons.annotations:
-        desc = ann['description'].lower()
-        if not any(skip in desc for skip in skip_words):
-            selected_annots.append(ann)
+    all_descriptions = [ann['description'].lower() for ann in raw_recons.annotations]
+    selected_annots = [
+        ann for ann,desc in zip(raw_recons.annotations, all_descriptions)
+        if not any(skip in desc for skip in skip_words)
+    ]
 
     print(f"Found {len(selected_annots)} valid annotations")
 
@@ -337,31 +343,34 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
 
 
     expected_length = int(16 * target_sfreq)
-    saved_count = 0
+    
+    print(f"Preparing {len(epochs_to_save)} epochs for batch processing...")
+    
+    all_epoch_data = []
+    all_annotation_descs = []
+
     for i in range(len(epochs_to_save)):
         single_epoch = epochs_to_save[i]
-
+        
         if i < len(valid_annotations):
             annotation_desc = valid_annotations[i]['description']
         else:
             annotation_desc = f"unknown_{i}"
-
+        
         epoch_data = single_epoch.get_data()
-
+        
         if epoch_data.shape[0] > 0:
             data = epoch_data[0]
             n_channels = 18
             n_times = expected_length
-
+            
             if data.shape[0] != n_channels:
                 if data.shape[0] > n_channels:
                     data = data[:n_channels, :]
-
                 else:
                     padding = np.zeros((n_channels - data.shape[0], data.shape[1]))
                     data = np.vstack([data, padding])
-
-
+            
             if data.shape[1] != n_times:
                 if data.shape[1] > n_times:
                     excess = data.shape[1] - n_times
@@ -374,23 +383,70 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
                     pad_right = padding_needed - pad_left
                     data = np.pad(data, ((0, 0), (pad_left, pad_right)),
                                  mode='constant', constant_values=0)
-
-
-            tensor = torch.FloatTensor(data).unsqueeze(0)  # [1, 18, 4096]
-
+            
+            tensor = torch.FloatTensor(data).unsqueeze(0)  # [1, 18, n_times]
             safe_desc = annotation_desc.replace('/', '_').replace('\\', '_')
-            pt_filename = f"epoch_{i + 1:05d}_{safe_desc}_{target_sfreq}Hz.pt"
+            
+            all_epoch_data.append(tensor)
+            all_annotation_descs.append(safe_desc)
+    
+    print(f"Prepared {len(all_epoch_data)} epochs in memory")
+    
+
+    def save_epoch_batch(batch_indices, batch_data, batch_descs, output_dir, target_sfreq, start_idx=0):
+        """multi epochs"""
+        local_saved = 0
+        for idx, (tensor, desc) in zip(batch_indices, zip(batch_data, batch_descs)):
+            pt_filename = f"epoch_{idx + start_idx + 1:05d}_{desc}_{target_sfreq}Hz.pt"
             pt_filepath = os.path.join(output_dir, pt_filename)
-
             torch.save(tensor, pt_filepath)
-            saved_count += 1
+            local_saved += 1
+            
+            
+            if local_saved % 50 == 0:
+                print(f"  Worker saved {local_saved}/{len(batch_data)} files")
+        
+        return local_saved
+    
 
-            if (i + 1) % 5 == 0:
-                print(f"Saved {i + 1}/{len(epochs_to_save)} PT files")
+    n_epochs = len(all_epoch_data)
+    n_workers = min(cpu_count(), 8) 
+    chunk_size = max(200, n_epochs // (n_workers * 3))  
+    mp.set_start_method('fork', force=True)
+    print(f"Using {n_workers} workers, chunk size: {chunk_size}")
+    
 
-        else:
-            print(f"Warning: Epoch {i + 1} has no data")
+    batches = []
+    for i in range(0, n_epochs, chunk_size):
+        end_idx = min(i + chunk_size, n_epochs)
+        batch_indices = list(range(i, end_idx))
+        batch_data = all_epoch_data[i:end_idx]
+        batch_descs = all_annotation_descs[i:end_idx]
+        batches.append((batch_indices, batch_data, batch_descs, i))
+    
 
+    print(f"Starting parallel save with {len(batches)} batches...")
+    
+    saved_count = 0
+    with Pool(processes=n_workers) as pool:
+
+        save_func = partial(save_epoch_batch, 
+                           output_dir=output_dir, 
+                           target_sfreq=target_sfreq)
+        
+        results = []
+        for batch_idx, (indices, data, descs, start_i) in enumerate(batches):
+            result = pool.apply_async(save_func, (indices, data, descs, start_i))
+            results.append((batch_idx, result))
+        
+        for batch_idx, result in results:
+            try:
+                batch_saved = result.get(timeout=300)  # 5分钟超时
+                saved_count += batch_saved
+                print(f"Batch {batch_idx + 1}/{len(batches)}: saved {batch_saved} files")
+            except Exception as e:
+                print(f"Error in batch {batch_idx}: {e}")
+    
     print(f"Saved {saved_count} PT files to {output_dir}")
 
 
@@ -400,6 +456,7 @@ def process_eeg_session(edf_path, csv_path, output_dir, target_sfreq=256):
     del raw, raw_cropped, raw_ref, raw_filter, raw_recons, epochs
     if need_resample:
         del epochs_resampled
+    del all_epoch_data, all_annotation_descs
     import gc
     gc.collect()
     return True
@@ -632,5 +689,4 @@ if __name__ == "__main__":
 
     print(f"\nProcessing complete. Check the output directory:")
     print(f"  {OUTPUT_BASE_DIR}")
-
 
